@@ -3,6 +3,7 @@
 A terminal IRC client written in Python.
 
 ![screenshot](img/scroll_screenshot.png)
+![screenshot](img/scroll_screenshot.gif)
 
 ```
 Usage: scroll [--help]
