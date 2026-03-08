@@ -12,13 +12,10 @@ scroll is a terminal IRC client written in Python.  It is built on top of
 window.py, a small ncurses abstraction that handles layout, panes, and the
 event loop.
 
-The immediate goal is a client that works without configuration: point it at
-a server in config.hcl and it connects, shows server messages, lets you join
-channels, and stays out of your way.
-
-The longer-term goal is a client that is fully scriptable from within the
-running process, with a built-in editor so that scripts can be written,
-tested, and reloaded without leaving the client.
+The goal is a client that works without configuration: point it at a server
+in config.hcl and it connects, shows server messages, lets you join channels,
+and stays out of your way.  Scripts are Python files that live in a directory
+of your choosing and can be reloaded at runtime without restarting.
 
 
 DESIGN PHILOSOPHY
@@ -29,19 +26,16 @@ scroll borrows from two clients with very different audiences.
 irssi (1999, Timo Sirainen) got the architecture right: a clean buffer model,
 stable Perl scripting with a signal/hook system, and a status bar that shows
 you exactly where you are.  Its weakness is that the scripting API requires
-you to understand its internals, and editing scripts means switching to another
-terminal.
+you to understand its internals.
 
 mIRC (1995, Khaled Mardam-Bey) got the user experience right: an approachable
-event system (on PRIVMSG, on JOIN), aliases that feel like shell functions, and
-a built-in editor so the feedback loop between writing and running a script is
-seconds rather than minutes.  Its weakness is that mIRC Script is a closed
-language that does not compose with anything else.
+event system (on PRIVMSG, on JOIN) and aliases that feel like shell functions.
+Its weakness is that mIRC Script is a closed language that does not compose
+with anything else.
 
-scroll aims to take the buffer model and signal architecture from irssi and
-the approachability and self-contained editing experience from mIRC, and
-implement both using Python as the scripting language so that there is no
-separate language to learn.
+scroll takes the buffer model and signal architecture from irssi and the
+approachable event-driven scripting model from mIRC, using Python as the
+scripting language so there is nothing new to learn.
 
 
 SCRIPTING
@@ -76,15 +70,16 @@ Aliases (custom slash commands) are registered with:
 
 This makes /greet <nick> available in the input line.
 
-Timer-based callbacks:
+Custom slash commands are registered the same way:
 
-    @on("timer:60")
-    def ping_check(event):
-        echo("server", "-- 60 seconds elapsed")
+    @on("command:greet")
+    def cmd_greet(args):
+        irc.privmsg(irc.current_channel, "hello, %s" % args)
 
-The scripting API is not yet implemented.  The event registration decorator,
-the irc proxy object, and the script loader are planned for a near release.
-This document will be updated when they land.  See: /doc scripting
+Scripts are loaded from scripts_directory at startup and reloaded with
+/reload.  Use /script to list loaded scripts with checksums, or
+/script edit <file.py> to open one in $EDITOR and return to the client
+when you close it.  See /doc scripting for the full API reference.
 
 
 DOCUMENTATION
@@ -97,8 +92,7 @@ Available topics are .txt files installed with the package.  You can add your
 own to ~/.scroll/docs/ and they will appear in /doc listings.
 
     /doc about        this document
-    /doc scripting    scripting API reference  (planned)
-    /doc config       configuration reference  (planned)
+    /doc scripting    scripting API reference
 
 
 ARCHITECTURE
@@ -117,12 +111,18 @@ The codebase is intentionally small.
                       tab completion, focus model, overlay menu.  Speaks to
                       irc.py through the IRCClient interface.
 
+    script.py         Scripting API.  Event registration, handler dispatch,
+                      IRC and TUI proxy objects exposed to scripts.
+
     docs.py           Doc file discovery and loading.
 
     __main__.py       Entry point.  Loads config.hcl, registers built-in
                       commands, patches the window cycle, wires layers together.
 
     docs/             Plain-text documentation files (this directory).
+
+    scripts/          User scripts directory (set scripts_directory in
+                      config.hcl to point here or anywhere else).
 
 
 BUGS AND CONTRIBUTIONS

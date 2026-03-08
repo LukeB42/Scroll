@@ -95,6 +95,10 @@ def load_config():
 
 def register_commands(tui, irc, cfg):
 
+    def _irc():
+        """Return the IRCClient for the current buffer, or None."""
+        return tui.current_irc()
+
     def cmd_join(args):
         """Join a channel.  Usage: /join #channel"""
         channel = args.strip()
@@ -103,15 +107,17 @@ def register_commands(tui, irc, cfg):
             return
         if not channel.startswith("#"):
             channel = "#" + channel
-        irc.join(channel)
+        c = _irc()
+        if c: c.join(channel)
 
     def cmd_part(args):
         """Leave a channel.  Usage: /part [#channel] [reason]"""
-        buf = tui.current_buffer()
+        buf   = tui.current_buffer()
         parts = args.split(" ", 1)
         channel = parts[0].strip() if parts[0].strip().startswith("#") else buf.name
         reason  = parts[-1] if len(parts) > 1 else "Leaving"
-        irc.part(channel, reason)
+        c = _irc()
+        if c: c.part(channel, reason)
 
     def cmd_msg(args):
         """Send a private message.  Usage: /msg <nick> <message>"""
@@ -119,11 +125,15 @@ def register_commands(tui, irc, cfg):
         if len(parts) < 2:
             tui.server_msg("Usage: /msg <nick> <message>")
             return
-        nick, text = parts
-        irc.privmsg(nick, text)
-        buf = tui.get_or_add_buffer(nick)
+        target, text = parts
+        c = _irc()
+        if not c:
+            tui.server_msg("msg: not connected")
+            return
+        c.privmsg(target, text)
+        buf = tui.get_or_add_buffer(target, c)
         from .tui import timestamp
-        buf.add(timestamp(), irc.nick, text)
+        buf.add(timestamp(), c.nick, text)
 
     def cmd_nick(args):
         """Change your nickname.  Usage: /nick <newnick>"""
@@ -131,27 +141,37 @@ def register_commands(tui, irc, cfg):
         if not new:
             tui.server_msg("Usage: /nick <newnick>")
             return
-        irc.raw("NICK %s" % new)
+        c = _irc()
+        if c: c.raw("NICK %s" % new)
 
     def cmd_quit(args):
-        """Disconnect and exit.  Usage: /quit [message]"""
+        """Disconnect from all servers and exit.  Usage: /quit [message]"""
         reason = args.strip() or "scroll"
-        irc.disconnect(reason)
+        seen = set()
+        for buf in tui.buffers:
+            if buf.irc and id(buf.irc) not in seen:
+                seen.add(id(buf.irc))
+                try:
+                    buf.irc.disconnect(reason)
+                except Exception:
+                    pass
         if tui._window:
-            tui._window.running = False   # let start() call stop() once
+            tui._window.running = False
 
     def cmd_raw(args):
         """Send a raw IRC command.  Usage: /raw <command>"""
         if args.strip():
-            irc.raw(args.strip())
+            c = _irc()
+            if c: c.raw(args.strip())
 
     def cmd_me(args):
         """/me action.  Usage: /me <action>"""
         buf = tui.current_buffer()
-        if buf and buf.name != "server":
-            irc.raw("PRIVMSG %s :\x01ACTION %s\x01" % (buf.name, args))
+        c   = _irc()
+        if buf and not buf.is_server and c:
+            c.raw("PRIVMSG %s :\x01ACTION %s\x01" % (buf.name, args))
             from .tui import timestamp
-            buf.add(timestamp(), "", "* %s %s" % (irc.nick, args))
+            buf.add(timestamp(), "", "* %s %s" % (c.nick, args))
 
     def cmd_topic(args):
         """View or set a channel topic.  Usage: /topic [new topic]"""
@@ -159,8 +179,10 @@ def register_commands(tui, irc, cfg):
         if not buf or not buf.name.startswith("#"):
             tui.server_msg("Not in a channel.")
             return
+        c = _irc()
+        if not c: return
         if args.strip():
-            irc.raw("TOPIC %s :%s" % (buf.name, args.strip()))
+            c.raw("TOPIC %s :%s" % (buf.name, args.strip()))
         else:
             tui.server_msg("Topic: %s" % buf.topic)
 
@@ -180,18 +202,110 @@ def register_commands(tui, irc, cfg):
         if tui._window and tui._window.window:
             tui._window.window.clear()
 
-    def cmd_server(args):
-        """Show current server info.  Usage: /server"""
-        tui.server_msg("Connected to %s:%s as %s" % (irc.host, irc.port, irc.nick))
+    def cmd_list(args):
+        """List channels.  Usage: /list [--min=<n>] [--max=<n>]"""
+        min_users = None
+        max_users = None
+        for token in args.split():
+            if token.startswith("--min="):
+                try:
+                    min_users = int(token[6:])
+                except ValueError:
+                    tui.server_msg("list: --min requires an integer")
+                    return
+            elif token.startswith("--max="):
+                try:
+                    max_users = int(token[6:])
+                except ValueError:
+                    tui.server_msg("list: --max requires an integer")
+                    return
+        tui._list_results = []
+        tui._list_filters = {}
+        if min_users is not None:
+            tui._list_filters["min_users"] = min_users
+        if max_users is not None:
+            tui._list_filters["max_users"] = max_users
+        tui.server_msg("-- requesting channel list...")
+        c = _irc()
+        if c: c.raw("LIST")
+
+    def cmd_mode(args):
+        """Set or view modes.  Usage: /mode [target] [modes] [params]"""
+        args = args.strip()
+        buf  = tui.current_buffer()
+        c    = _irc()
+        if not c: return
+        if not args:
+            target = buf.name if buf and buf.name.startswith("#") else c.nick
+            c.raw("MODE %s" % target)
+        else:
+            parts = args.split()
+            if parts[0].startswith("+") or parts[0].startswith("-"):
+                target = buf.name if buf and buf.name.startswith("#") else c.nick
+                c.raw("MODE %s %s" % (target, args))
+            else:
+                c.raw("MODE %s" % args)
+
+    def cmd_connect(args):
+        """Connect to a server.  Usage: /connect <host> [port]"""
+        from .irc import IRCClient
+        args = args.strip()
+        if not args:
+            c = _irc()
+            if c and c.connected:
+                tui.server_msg("Connected to %s:%s as %s" % (c.host, c.port, c.nick))
+            else:
+                tui.server_msg("Not connected.  Usage: /connect <host> [port]")
+            return
+        parts    = args.split()
+        new_host = parts[0]
+        try:
+            new_port = int(parts[1]) if len(parts) > 1 else 6667
+        except ValueError:
+            tui.server_msg("connect: invalid port")
+            return
+        # Create a new client inheriting identity from the initial one
+        new_client = IRCClient(new_host, new_port, irc.nick, irc.ident, irc.realname)
+        buf = tui.add_server(new_client, new_host)
+        tui.switch_to(tui.buffers.index(buf))
+        new_client.handlers.append(
+            lambda msg, c=new_client: tui.handle_irc(msg, c)
+        )
+        from . import script as _script
+        tui.server_msg("Connecting to %s:%d as %s …" % (new_host, new_port, irc.nick),
+                       client=new_client)
+        def _do_connect():
+            try:
+                new_client.connect()
+            except Exception as e:
+                tui.server_msg("Connection failed: %s" % e, client=new_client)
+        threading.Thread(target=_do_connect, daemon=True).start()
+
+    def cmd_disconnect(args):
+        """Disconnect from the current server.  Usage: /disconnect [message]"""
+        c = _irc()
+        if not c or not c.connected:
+            tui.server_msg("Not connected.")
+            return
+        reason = args.strip() or "scroll"
+        c.disconnect(reason)
+        from .tui import timestamp
+        tui._server_buf_for(c).add(timestamp(), "", "* Disconnected (%s)" % reason)
 
     def cmd_wc(args):
         """Close the current window.  Parts the channel if in one.  Usage: /wc"""
         buf = tui.current_buffer()
-        if tui.buf_index == 0:
-            tui.server_msg("Cannot close the status window.")
-            return
-        if buf.name.startswith("#") and irc.connected:
-            irc.part(buf.name)
+        if buf and buf.is_server:
+            if buf.irc and buf.irc.connected:
+                tui.server_msg("Cannot close a server buffer while connected.  Use /disconnect first.")
+                return
+            server_bufs = [b for b in tui.buffers if b.is_server]
+            if len(server_bufs) <= 1:
+                tui.server_msg("Cannot close the last server buffer.")
+                return
+        c = buf.irc if buf else None
+        if buf and buf.name.startswith("#") and c and c.connected:
+            c.part(buf.name)
         tui.remove_buffer(buf)
 
     def cmd_exec(args):
@@ -239,23 +353,27 @@ With -o: send output to the current channel (>2 lines prompts for stagger)."""
 
         # -o path: need a channel/query target
         buf = tui.current_buffer()
-        if not buf or buf.name == "server":
+        if not buf or buf.is_server:
             tui.server_msg("exec -o: not in a channel")
             return
         target = buf.name
+        c      = _irc()
+        if not c:
+            tui.server_msg("exec -o: not connected")
+            return
 
         from .tui import timestamp
 
         def send_lines_now():
             for line in lines:
-                irc.privmsg(target, line)
-                buf.add(timestamp(), irc.nick, line)
+                c.privmsg(target, line)
+                buf.add(timestamp(), c.nick, line)
 
         def send_lines_staggered():
             def _worker():
                 for line in lines:
-                    irc.privmsg(target, line)
-                    buf.add(timestamp(), irc.nick, line)
+                    c.privmsg(target, line)
+                    buf.add(timestamp(), c.nick, line)
                     time.sleep(2)
             threading.Thread(target=_worker, daemon=True).start()
 
@@ -383,13 +501,18 @@ With -o: send output to the current channel (>2 lines prompts for stagger)."""
         ("quit",   cmd_quit),
         ("exit",   cmd_quit),   # alias
         ("raw",    cmd_raw),
+        ("quote",  cmd_raw),   # alias
+        ("list",   cmd_list),
         ("me",     cmd_me),
         ("topic",  cmd_topic),
         ("names",  cmd_names),
         ("clear",  cmd_clear),
-        ("server", cmd_server),
-        ("doc",    cmd_doc),
-        ("wc",     cmd_wc),
+        ("mode",       cmd_mode),
+        ("connect",    cmd_connect),
+        ("server",     cmd_connect),     # alias
+        ("disconnect", cmd_disconnect),
+        ("doc",        cmd_doc),
+        ("wc",         cmd_wc),
         ("exec",   cmd_exec),
         ("script", cmd_script),
         ("reload", cmd_reload),
@@ -420,6 +543,14 @@ def patch_alt_keys(win, tui):
 
         if character == 12:   # ^L
             win.window.clear()
+            return
+
+        if character == 24:   # ^X — cycle between server buffers
+            srv = [i for i, b in enumerate(tui.buffers) if b.is_server]
+            if len(srv) > 1:
+                later = [i for i in srv if i > tui.buf_index]
+                tui.switch_to(later[0] if later else srv[0])
+                win.window.clear()
             return
 
         if _esc_pending[0]:
@@ -470,6 +601,7 @@ config.hcl keys:
 
 Key bindings:
   Ctrl+N / Ctrl+P   next / previous buffer
+  Ctrl+X            cycle between server buffers
   Alt+1 .. Alt+9    jump directly to buffer N
   Ctrl+W            delete last word in input
   Ctrl+U            clear input line
@@ -499,27 +631,36 @@ def main():
 
     cfg, cfg_path = load_config()
 
-    nick     = cfg.get("nick",     "scrolluser")
+    try:
+        import pwd
+        _unix_user = pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        _unix_user = "scrolluser"
+
+    nick     = cfg.get("nick",     _unix_user)
     realname = cfg.get("realname", nick)
     ident    = cfg.get("ident",    nick)
     servers  = cfg.get("servers",  [])
 
     if not servers:
-        print("scroll: no servers defined in config.hcl", file=sys.stderr)
-        sys.exit(1)
-
-    server = servers[0]
-    host   = server.get("host", "irc.libera.chat")
-    port   = int(server.get("port", 6667))
-    name   = server.get("name", host)
+        # Start without a connection; user can /connect manually.
+        host = ""
+        port = 6667
+        name = "server"
+    else:
+        server = servers[0]
+        host   = server.get("host", "irc.libera.chat")
+        port   = int(server.get("port", 6667))
+        name   = server.get("name", host)
 
     from .irc import IRCClient
     from .tui import ScrollTUI
 
     tui = ScrollTUI()
     irc = IRCClient(host, port, nick, ident, realname)
-    tui.irc = irc
-    irc.handlers.append(tui.handle_irc)
+    # Wire the initial client into the placeholder server buffer
+    tui.add_server(irc, name if name else "server")
+    irc.handlers.append(lambda msg, c=irc: tui.handle_irc(msg, c))
 
     register_commands(tui, irc, cfg)
 
@@ -527,37 +668,39 @@ def main():
     _script._setup(irc, tui)
     load_scripts(cfg.get("scripts_directory"), tui)
 
-    # Update the server buffer name
-    tui.buffers[0].name = name
-
     def connect():
-        tui.server_msg("Connecting to %s (%s:%d) as %s …" % (name, host, port, nick))
+        tui.server_msg("Connecting to %s (%s:%d) as %s …" % (name, host, port, nick),
+                       client=irc)
         try:
             irc.connect()
-            tui.server_msg("Connected.")
         except Exception as e:
-            tui.server_msg("Connection failed: %s" % e)
+            tui.server_msg("Connection failed: %s" % e, client=irc)
 
-    # Graceful Ctrl+C / SIGINT
+    # Graceful Ctrl+C / SIGINT — disconnect all clients
     def handle_sigint(sig, frame):
-        try:
-            irc.disconnect("scroll")
-        except Exception:
-            pass
+        seen = set()
+        for buf in tui.buffers:
+            if buf.irc and id(buf.irc) not in seen:
+                seen.add(id(buf.irc))
+                try:
+                    buf.irc.disconnect("scroll")
+                except Exception:
+                    pass
         if tui._window:
-            tui._window.running = False   # let start() call stop() once
+            tui._window.running = False
 
     signal.signal(signal.SIGINT, handle_sigint)
 
     win = tui.build_window()
     patch_alt_keys(win, tui)
 
-    # Wire IRC poll + topic refresh into the cycle
+    # Wire IRC poll + topic refresh into the cycle; poll every connected client
     original_cycle = win.cycle
 
     def patched_cycle():
-        if irc.connected:
-            irc.poll()
+        for buf in list(tui.buffers):
+            if buf.is_server and buf.irc and buf.irc.connected:
+                buf.irc.poll()
         tui.refresh_topic()
         tui.refresh_side_panels()
         original_cycle()
@@ -565,7 +708,10 @@ def main():
 
     win.cycle = patched_cycle
 
-    connect()
+    if host:
+        connect()
+    else:
+        tui.server_msg("No servers in config.  Use /connect <host> [port] to connect.")
     win.start()
 
 

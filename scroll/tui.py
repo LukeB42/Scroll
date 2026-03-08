@@ -69,6 +69,8 @@ class Buffer:
         self.unread     = False
         self.kind       = "chat"    # "chat" | "doc"
         self.scroll_pos = 0         # first visible line (doc buffers only)
+        self.irc        = None      # IRCClient this buffer belongs to
+        self.is_server  = False     # True for the per-connection status buffer
 
     def add(self, ts, nick, text, attrs=0):
         self.lines.append((ts, nick, text, attrs))
@@ -93,15 +95,20 @@ class Buffer:
     def render_lines(self, width, height):
         """
         Return display lines for the visible area.
-        Doc buffers slice from scroll_pos; chat buffers pin to the bottom.
-        Pass ts=None when adding a line to suppress the timestamp prefix.
+        Doc buffers: scroll_pos = first visible line from top.
+        Chat buffers: scroll_pos = lines scrolled back from bottom (0 = live).
         """
         rendered = self._render_all(width)
         if self.kind == "doc":
             start = max(0, min(self.scroll_pos, max(0, len(rendered) - height)))
-            self.scroll_pos = start          # clamp in place
+            self.scroll_pos = start
             return rendered[start:start + height] if height > 0 else rendered[start:]
-        return rendered[-height:] if height > 0 else rendered
+        # chat: scroll_pos is offset back from the bottom
+        total = len(rendered)
+        max_back = max(0, total - height)
+        self.scroll_pos = max(0, min(self.scroll_pos, max_back))
+        end = total - self.scroll_pos
+        return rendered[max(0, end - height):end] if height > 0 else rendered
 
 
 # ── Panes ────────────────────────────────────────────────────────────────────
@@ -141,27 +148,41 @@ class MessagePane(Pane):
         if self._tui._focus != "input":
             return
         buf = self._buf()
-        if buf is None or buf.kind != "doc":
+        if buf is None:
             return
-        h       = self.height or 24
-        w       = self.width  or 80
-        total   = len(buf._render_all(w))
-        max_pos = max(0, total - h)
+        h     = self.height or 24
+        w     = self.width  or 80
+        total = len(buf._render_all(w))
 
-        if character == 259:    # Up
-            buf.scroll_pos = max(0, buf.scroll_pos - 1)
-        elif character == 258:  # Down
-            buf.scroll_pos = min(max_pos, buf.scroll_pos + 1)
-        elif character == 339:  # PgUp
-            buf.scroll_pos = max(0, buf.scroll_pos - h)
-        elif character == 338:  # PgDn
-            buf.scroll_pos = min(max_pos, buf.scroll_pos + h)
-        elif character == 262:  # Home
-            buf.scroll_pos = 0
-        elif character == 360:  # End
-            buf.scroll_pos = max_pos
+        if buf.kind == "doc":
+            max_pos = max(0, total - h)
+            if character == 259:    # Up
+                buf.scroll_pos = max(0, buf.scroll_pos - 1)
+            elif character == 258:  # Down
+                buf.scroll_pos = min(max_pos, buf.scroll_pos + 1)
+            elif character == 339:  # PgUp
+                buf.scroll_pos = max(0, buf.scroll_pos - h)
+            elif character == 338:  # PgDn
+                buf.scroll_pos = min(max_pos, buf.scroll_pos + h)
+            elif character == 262:  # Home
+                buf.scroll_pos = 0
+            elif character == 360:  # End
+                buf.scroll_pos = max_pos
+            else:
+                return
         else:
-            return
+            # chat buffer: scroll_pos = lines back from bottom; 0 = live
+            max_back = max(0, total - h)
+            if character == 339:    # PgUp
+                buf.scroll_pos = min(max_back, buf.scroll_pos + h)
+            elif character == 338:  # PgDn
+                buf.scroll_pos = max(0, buf.scroll_pos - h)
+            elif character == 262:  # Home
+                buf.scroll_pos = max_back
+            elif character == 360:  # End
+                buf.scroll_pos = 0
+            else:
+                return
         self.window.window.clear()
 
 
@@ -510,11 +531,14 @@ class ScrollTUI:
         self.irc        = None     # set by caller
         self.commands   = {}       # name → (func, docstring)
         self._window    = None
-        self._confirm   = None     # pending confirmation: {"prompt", "yes_cb", "no_cb"}
-        self._focus     = "input"  # "input" | "nicks" | "menu"
+        self._confirm      = None     # pending confirmation: {"prompt", "yes_cb", "no_cb"}
+        self._focus        = "input"  # "input" | "nicks" | "menu"
+        self._list_results = None     # collecting 322 replies; None = not in a /list
+        self._list_filters = {}       # min_users, max_users
 
-        # server buffer is always index 0
-        self._add_buffer("server")
+        # server buffer is always index 0; irc is wired later by caller
+        buf = self._add_buffer("server")
+        buf.is_server = True
 
     # ── buffer management ────────────────────────────────────────────────────
 
@@ -529,7 +553,50 @@ class ScrollTUI:
                 return b
         return None
 
-    def get_or_add_buffer(self, name):
+    def add_server(self, client, name):
+        """Create (or reuse index-0 placeholder) a server buffer for *client*."""
+        # Reuse the placeholder created by __init__ if it has no client yet
+        placeholder = self.buffers[0] if self.buffers and self.buffers[0].irc is None else None
+        if placeholder:
+            placeholder.name      = name
+            placeholder.irc       = client
+            placeholder.is_server = True
+            return placeholder
+        buf = self._add_buffer(name)
+        buf.irc       = client
+        buf.is_server = True
+        return buf
+
+    def current_irc(self):
+        """Return the IRCClient associated with the currently visible buffer."""
+        buf = self.current_buffer()
+        if buf and buf.irc:
+            return buf.irc
+        # fall back to first connected client
+        for b in self.buffers:
+            if b.irc and b.irc.connected:
+                return b.irc
+        # fall back to any client
+        for b in self.buffers:
+            if b.irc:
+                return b.irc
+        return self.irc   # legacy
+
+    def _server_buf_for(self, client):
+        """Return the server buffer that belongs to *client*."""
+        for b in self.buffers:
+            if b.is_server and b.irc is client:
+                return b
+        return self.buffers[0]
+
+    def get_or_add_buffer(self, name, irc_client=None):
+        if irc_client:
+            for b in self.buffers:
+                if b.name.lower() == name.lower() and b.irc is irc_client:
+                    return b
+            b = self._add_buffer(name)
+            b.irc = irc_client
+            return b
         b = self.get_buffer(name)
         return b if b else self._add_buffer(name)
 
@@ -560,14 +627,15 @@ class ScrollTUI:
 
     # ── message helpers ──────────────────────────────────────────────────────
 
-    def server_msg(self, text, attrs=0):
+    def server_msg(self, text, attrs=0, client=None):
         ts  = timestamp()
-        buf = self.buffers[0]
+        c   = client or self.current_irc()
+        buf = self._server_buf_for(c) if c else self.buffers[0]
         buf.add(ts, "", text, attrs)
 
-    def channel_msg(self, target, nick, text, attrs=0):
+    def channel_msg(self, target, nick, text, attrs=0, irc_client=None):
         ts  = timestamp()
-        buf = self.get_or_add_buffer(target)
+        buf = self.get_or_add_buffer(target, irc_client)
         buf.add(ts, nick, text, attrs)
         if buf is not self.current_buffer():
             buf.unread = True
@@ -578,13 +646,15 @@ class ScrollTUI:
         """Fire a scripting event.  Failures are silently swallowed."""
         try:
             from . import script as _script
+            if event == "connect" and "irc_client" in kwargs:
+                kwargs["server"] = _script._ServerHandle(kwargs.pop("irc_client"))
             _script.fire(event, **kwargs)
         except Exception:
             pass
 
     # ── IRC event dispatch ───────────────────────────────────────────────────
 
-    def handle_irc(self, msg):
+    def handle_irc(self, msg, irc_client=None):
         """Called for every inbound IRC message."""
         cmd      = msg["command"]
         prefix   = msg["prefix"]
@@ -592,39 +662,39 @@ class ScrollTUI:
         trailing = msg["trailing"]
         raw      = msg.get("raw", "")
         nick     = prefix.split("!")[0] if "!" in prefix else prefix
+        c        = irc_client or self.irc   # the client that sent this message
 
         if cmd in ("001", "002", "003", "004", "372", "375", "376",
                    "251", "252", "253", "254", "255"):
-            self.server_msg(trailing or " ".join(params))
+            self.server_msg(trailing or " ".join(params), client=c)
             if cmd == "001":
-                self._fire("connect")
+                self._fire("connect", irc_client=c)
 
         elif cmd == "NOTICE":
             target = params[0] if params else ""
             if target.startswith("#"):
-                self.channel_msg(target, "-" + nick + "-", trailing)
+                self.channel_msg(target, "-" + nick + "-", trailing, irc_client=c)
             else:
-                self.server_msg("-%s- %s" % (nick, trailing))
+                self.server_msg("-%s- %s" % (nick, trailing), client=c)
             self._fire("notice", nick=nick, target=target, text=trailing, raw=raw)
 
         elif cmd == "JOIN":
             channel = trailing or (params[0] if params else "")
-            buf = self.get_or_add_buffer(channel)
+            buf = self.get_or_add_buffer(channel, c)
             buf.add(timestamp(), "", "* %s has joined %s" % (nick, channel))
-            if nick == (self.irc.nick if self.irc else ""):
+            if nick == (c.nick if c else ""):
                 self.switch_to(self.buffers.index(buf))
             self._fire("join", nick=nick, channel=channel, raw=raw)
 
         elif cmd == "PART":
             channel = params[0] if params else ""
-            buf = self.get_buffer(channel)
-            if buf:
-                buf.add(timestamp(), "", "* %s has left %s (%s)" % (nick, channel, trailing))
+            buf = self.get_or_add_buffer(channel, c)
+            buf.add(timestamp(), "", "* %s has left %s (%s)" % (nick, channel, trailing))
             self._fire("part", nick=nick, channel=channel, reason=trailing, raw=raw)
 
         elif cmd == "QUIT":
             for buf in self.buffers:
-                if nick in buf.nicks:
+                if buf.irc is c and nick in buf.nicks:
                     buf.nicks.remove(nick)
                     buf.add(timestamp(), "", "* %s has quit (%s)" % (nick, trailing))
             self._fire("quit", nick=nick, reason=trailing, raw=raw)
@@ -641,47 +711,52 @@ class ScrollTUI:
                 if ctcp_cmd == "ACTION":
                     line = "* %s %s" % (nick, ctcp_arg)
                     if target.startswith("#"):
-                        self.channel_msg(target, "", line)
+                        self.channel_msg(target, "", line, irc_client=c)
                     else:
-                        self.channel_msg(nick, "", line)
+                        self.channel_msg(nick, "", line, irc_client=c)
                     self._fire("action", nick=nick, target=target, text=ctcp_arg, raw=raw)
 
                 elif ctcp_cmd == "VERSION":
-                    self.irc.notice(nick, "\x01VERSION scroll\x01")
-                    self.server_msg("CTCP VERSION from %s" % nick)
+                    c.notice(nick, "\x01VERSION scroll\x01")
+                    self.server_msg("CTCP VERSION from %s" % nick, client=c)
 
                 elif ctcp_cmd == "PING":
-                    self.irc.notice(nick, "\x01PING %s\x01" % ctcp_arg)
-                    self.server_msg("CTCP PING from %s" % nick)
+                    c.notice(nick, "\x01PING %s\x01" % ctcp_arg)
+                    self.server_msg("CTCP PING from %s" % nick, client=c)
 
                 else:
-                    self.server_msg("CTCP %s from %s (ignored)" % (ctcp_cmd, nick))
+                    self.server_msg("CTCP %s from %s (ignored)" % (ctcp_cmd, nick), client=c)
 
             elif target.startswith("#"):
-                self.channel_msg(target, nick, text)
+                self.channel_msg(target, nick, text, irc_client=c)
                 self._fire("privmsg", nick=nick, target=target, text=text, raw=raw)
             else:
-                self.channel_msg(nick, nick, text)
+                self.channel_msg(nick, nick, text, irc_client=c)
                 self._fire("privmsg", nick=nick, target=nick, text=text, raw=raw)
 
         elif cmd == "353":  # RPL_NAMREPLY
             channel = params[2] if len(params) > 2 else ""
-            buf = self.get_or_add_buffer(channel)
+            buf = self.get_or_add_buffer(channel, c)
             nicks = trailing.split()
             for n in nicks:
                 clean = n.lstrip("@+%&~!")
                 if clean not in buf.nicks:
                     buf.nicks.append(n)
 
+        elif cmd == "366":  # RPL_ENDOFNAMES
+            channel = params[1] if len(params) > 1 else ""
+            buf = self.get_or_add_buffer(channel, c)
+            buf.add(timestamp(), "", "%d nicks in %s" % (len(buf.nicks), channel))
+
         elif cmd == "332":  # RPL_TOPIC
             channel = params[1] if len(params) > 1 else ""
-            buf = self.get_or_add_buffer(channel)
+            buf = self.get_or_add_buffer(channel, c)
             buf.topic = trailing
             buf.add(timestamp(), "", "Topic: %s" % trailing)
 
         elif cmd == "TOPIC":
             channel = params[0] if params else ""
-            buf = self.get_or_add_buffer(channel)
+            buf = self.get_or_add_buffer(channel, c)
             buf.topic = trailing
             buf.add(timestamp(), "", "* %s changed topic to: %s" % (nick, trailing))
             self._fire("topic", nick=nick, channel=channel, text=trailing, raw=raw)
@@ -689,41 +764,78 @@ class ScrollTUI:
         elif cmd == "KICK":
             channel = params[0] if params else ""
             kicked  = params[1] if len(params) > 1 else ""
-            buf = self.get_buffer(channel)
-            if buf:
-                buf.add(timestamp(), "", "* %s was kicked from %s by %s (%s)" % (
-                    kicked, channel, nick, trailing))
-                if kicked == (self.irc.nick if self.irc else ""):
-                    buf.nicks = []
+            buf = self.get_or_add_buffer(channel, c)
+            buf.add(timestamp(), "", "* %s was kicked from %s by %s (%s)" % (
+                kicked, channel, nick, trailing))
+            if kicked == (c.nick if c else ""):
+                buf.nicks = []
             self._fire("kick", nick=nick, channel=channel, kicked=kicked, reason=trailing, raw=raw)
 
         elif cmd == "NICK":
             new_nick = trailing or (params[0] if params else "")
             for buf in self.buffers:
-                if nick in [n.lstrip("@+%&~!") for n in buf.nicks]:
+                if buf.irc is c and nick in [n.lstrip("@+%&~!") for n in buf.nicks]:
                     buf.add(timestamp(), "", "* %s is now known as %s" % (nick, new_nick))
+            if c and nick == c.nick:
+                c.nick = new_nick
             self._fire("nick", old_nick=nick, new_nick=new_nick, raw=raw)
 
         elif cmd == "MODE":
             target = params[0] if params else ""
             mode   = params[1] if len(params) > 1 else ""
             extra  = " ".join(params[2:])
-            buf = self.get_buffer(target) or self.buffers[0]
+            buf = self.get_or_add_buffer(target, c) if target.startswith("#") \
+                  else self._server_buf_for(c)
             buf.add(timestamp(), "", "* Mode %s [%s %s] by %s" % (target, mode, extra, nick))
             self._fire("mode", nick=nick, target=target, mode=mode + " " + extra, raw=raw)
 
+        elif cmd == "321":  # RPL_LISTSTART
+            self._list_results = []
+
+        elif cmd == "322":  # RPL_LIST  — channel, user count, topic
+            channel   = params[1] if len(params) > 1 else ""
+            try:
+                users = int(params[2]) if len(params) > 2 else 0
+            except ValueError:
+                users = 0
+            topic = trailing
+            if self._list_results is not None:
+                self._list_results.append((channel, users, topic))
+
+        elif cmd == "323":  # RPL_LISTEND
+            if self._list_results is not None:
+                results = self._list_results
+                self._list_results = None
+                mn = self._list_filters.get("min_users")
+                mx = self._list_filters.get("max_users")
+                self._list_filters = {}
+                if mn is not None:
+                    results = [r for r in results if r[1] >= mn]
+                if mx is not None:
+                    results = [r for r in results if r[1] <= mx]
+                results.sort(key=lambda r: r[1], reverse=True)
+                if not results:
+                    self.server_msg("-- /list: no channels matched", client=c)
+                else:
+                    col = max(len(r[0]) for r in results)
+                    self.server_msg("  %-*s  users  topic" % (col, "channel"), client=c)
+                    self.server_msg("  %s  -----  -----" % ("-" * col), client=c)
+                    for channel, users, topic in results:
+                        self.server_msg("  %-*s  %-5d  %s" % (col, channel, users, topic), client=c)
+                    self.server_msg("-- %d channel(s)" % len(results), client=c)
+
         elif cmd == "433":  # ERR_NICKNAMEINUSE
-            self.server_msg("* Nickname in use, trying with _")
-            if self.irc:
-                self.irc.nick = self.irc.nick + "_"
-                self.irc.raw("NICK %s" % self.irc.nick)
+            self.server_msg("* Nickname in use, trying with _", client=c)
+            if c:
+                c.nick = c.nick + "_"
+                c.raw("NICK %s" % c.nick)
 
         elif cmd == "ERROR":
-            self.server_msg("ERROR: %s" % trailing)
+            self.server_msg("ERROR: %s" % trailing, client=c)
 
         else:
             if raw:
-                self.server_msg(raw)
+                self.server_msg(raw, client=c)
 
     # ── command dispatch ─────────────────────────────────────────────────────
 
@@ -764,13 +876,11 @@ class ScrollTUI:
         if line.startswith("/"):
             self.dispatch_command(line)
         else:
-            buf = self.current_buffer()
-            if buf and buf.name.startswith("#") and self.irc and self.irc.connected:
-                self.irc.privmsg(buf.name, line)
-                buf.add(timestamp(), self.irc.nick, line)
-            elif buf and not buf.name.startswith("server") and self.irc and self.irc.connected:
-                self.irc.privmsg(buf.name, line)
-                buf.add(timestamp(), self.irc.nick, line)
+            buf    = self.current_buffer()
+            client = self.current_irc()
+            if buf and not buf.is_server and buf.kind != "doc" and client and client.connected:
+                client.privmsg(buf.name, line)
+                buf.add(timestamp(), client.nick, line)
             else:
                 self.server_msg("Not in a channel.  Use /join #channel")
 

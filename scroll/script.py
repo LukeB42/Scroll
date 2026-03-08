@@ -133,16 +133,52 @@ def _register_command(name, func):
         _tui.register_command(name, _wrapper)
 
 
+# ── per-connection handle (passed to connect event as e.server) ───────────────
+
+class _ServerHandle:
+    """
+    Thin wrapper around one IRCClient, safe to hand to script event handlers.
+    Passed as e.server in connect events so scripts can capture a reference
+    to a specific server independent of which one is currently active.
+    """
+    def __init__(self, client):
+        self._c = client
+
+    @property
+    def host(self):       return self._c.host
+    @property
+    def port(self):       return self._c.port
+    @property
+    def nick(self):       return self._c.nick
+    @property
+    def connected(self):  return self._c.connected
+
+    def raw(self, line):               self._c.raw(line)
+    def privmsg(self, target, text):   self._c.privmsg(target, text)
+    def notice(self, target, text):    self._c.notice(target, text)
+    def join(self, channel):           self._c.join(channel)
+    def part(self, channel, reason=""): self._c.part(channel, reason)
+
+
 # ── irc proxy ─────────────────────────────────────────────────────────────────
 
 class _IRCProxy:
     """
-    Exposes IRC actions to scripts.  Attributes are read live so scripts
-    that import `irc` at module load time still see the connected state.
+    Exposes IRC actions to scripts, always resolving against the server
+    associated with the currently visible buffer.
     """
     @property
+    def _client(self):
+        if _tui:
+            c = _tui.current_irc()
+            if c:
+                return c
+        return _irc   # fallback to initial client
+
+    @property
     def nick(self):
-        return _irc.nick if _irc else ""
+        c = self._client
+        return c.nick if c else ""
 
     @property
     def current_channel(self):
@@ -151,27 +187,28 @@ class _IRCProxy:
 
     @property
     def connected(self):
-        return bool(_irc and _irc.connected)
+        c = self._client
+        return bool(c and c.connected)
 
     def privmsg(self, target, text):
-        if _irc:
-            _irc.privmsg(target, text)
+        c = self._client
+        if c: c.privmsg(target, text)
 
     def notice(self, target, text):
-        if _irc:
-            _irc.notice(target, text)
+        c = self._client
+        if c: c.notice(target, text)
 
     def join(self, channel):
-        if _irc:
-            _irc.join(channel)
+        c = self._client
+        if c: c.join(channel)
 
     def part(self, channel, reason=""):
-        if _irc:
-            _irc.part(channel, reason)
+        c = self._client
+        if c: c.part(channel, reason)
 
     def raw(self, line):
-        if _irc:
-            _irc.raw(line)
+        c = self._client
+        if c: c.raw(line)
 
 
 class _TUIProxy:

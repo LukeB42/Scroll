@@ -47,7 +47,7 @@ Complete event table:
 
     EVENT       ATTRIBUTES
     ─────────────────────────────────────────────────────────────────────
-    connect     (none — fired when the server sends 001 Welcome)
+    connect     server  (a handle to the connected server — see below)
     privmsg     nick, target, text, raw
     notice      nick, target, text, raw
     action      nick, target, text, raw       (/me messages)
@@ -58,6 +58,13 @@ Complete event table:
     nick        old_nick, new_nick, raw
     topic       nick, channel, text, raw
     mode        nick, target, mode, raw
+
+The connect event's e.server attribute is a handle to the specific server
+that just connected.  It exposes the same interface as the irc proxy:
+host, port, nick, connected, raw(), privmsg(), notice(), join(), part().
+Capturing it is important when running multiple servers simultaneously —
+irc.raw() always goes to the currently active server, but server.raw()
+goes to the one that fired the event regardless of what is on screen.
 
 Multiple handlers for the same event are all called in registration order.
 An exception in one handler does not prevent others from running — the error
@@ -372,11 +379,13 @@ scroll equivalent of irssi's timer system.
 
     @on("connect")
     def start_timers(e):
-        def lagcheck():
-            if irc.connected:
-                irc.raw("PING :lagcheck")
+        # Capture e.server so the timer pings the right server even when
+        # multiple connections are open and the active buffer has changed.
+        def lagcheck(server=e.server):
+            if server.connected:
+                server.raw("PING :lagcheck")
         every(60, lagcheck)
-        echo("server", "-- heartbeat started (PING every 60s)")
+        echo("server", "-- heartbeat started on %s (PING every 60s)" % e.server.host)
 
 
 ────────────────────────────────────────────────────────────────────────────
