@@ -46,5 +46,17 @@ Commands (type /help inside scroll for full list):
 ## Install
 
 ```
+pip install .
+```
+
+This creates `~/.scroll/` with a default `config.hcl`, a `scripts/` directory
+containing the bundled scripts, and a `docs/` directory for user documentation.
+Existing files are never overwritten.
+
+Edit `~/.scroll/config.hcl` to set your nick and servers.
+
+For development:
+
+```
 pip install -e .
 ```

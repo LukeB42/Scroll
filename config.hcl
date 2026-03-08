@@ -1,8 +1,8 @@
-nick = "scrolluser"
-realname = "scrolluser"
-ident = "scroll@scroll.com"
+nick     = "${USER}"
+realname = "${USER}"
+ident    = "${USER}"
 
-scripts_directory = "./scripts/"
+scripts_directory = "~/.scroll/scripts/"
 
 servers = [
   { name = "Rizon", host = "irc.rizon.net", port = 6667 },

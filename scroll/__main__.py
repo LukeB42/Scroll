@@ -24,6 +24,9 @@ def parse_hcl(text):
     """
     cfg = {}
 
+    # expand $VAR and ${VAR} from the environment before anything else
+    text = os.path.expandvars(text)
+
     # strip comments
     text = re.sub(r'//[^\n]*', '', text)
     text = re.sub(r'#[^\n]*',  '', text)
@@ -78,11 +81,10 @@ def load_scripts(scripts_dir, tui):
 
 
 def load_config():
-    # Look for config.hcl next to the package, then in ~/.config/scroll/
     candidates = [
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.hcl"),
-        os.path.expanduser("~/.config/scroll/config.hcl"),
         os.path.expanduser("~/.scroll/config.hcl"),
+        os.path.expanduser("~/.config/scroll/config.hcl"),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.hcl"),  # dev fallback
     ]
     for path in candidates:
         if os.path.exists(path):
