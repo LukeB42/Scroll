@@ -161,6 +161,7 @@ class Window(object):
 
     def draw(self):
         self.update_window_size()
+        self.window.erase()
         self.calculate_pane_heights_and_widths()
         self.coordinate()
         self.cursor_pos = None
