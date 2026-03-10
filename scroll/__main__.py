@@ -623,7 +623,7 @@ def patch_alt_keys(win, tui):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 HELP_TEXT = """\
-Usage: scroll [--help]
+Usage: scroll [--help] [--headless]
 
 scroll is a minimal irssi-inspired IRC client.
 
@@ -661,10 +661,26 @@ Commands (type /help inside scroll for full list):
 """
 
 
+def daemonize():
+    """Fork twice to fully detach from the controlling terminal."""
+    if os.fork() > 0:
+        sys.exit(0)
+    os.setsid()
+    if os.fork() > 0:
+        sys.exit(0)
+    # Redirect stdio to /dev/null
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (sys.stdin.fileno(), sys.stdout.fileno(), sys.stderr.fileno()):
+        os.dup2(devnull, fd)
+    os.close(devnull)
+
+
 def main():
     if "--help" in sys.argv or "-h" in sys.argv:
         print(HELP_TEXT, end="")
         sys.exit(0)
+
+    headless = "--headless" in sys.argv
 
     cfg, cfg_path = load_config()
 
@@ -714,7 +730,10 @@ def main():
             tui.server_msg("Connection failed: %s" % e, client=irc)
 
     # Graceful Ctrl+C / SIGINT — disconnect all clients
+    _headless_running = [True]
+
     def handle_sigint(sig, frame):
+        _headless_running[0] = False
         seen = set()
         for buf in tui.buffers:
             if buf.irc and id(buf.irc) not in seen:
@@ -726,7 +745,20 @@ def main():
         if tui._window:
             tui._window.running = False
 
-    signal.signal(signal.SIGINT, handle_sigint)
+    signal.signal(signal.SIGINT,  handle_sigint)
+    signal.signal(signal.SIGTERM, handle_sigint)
+
+    if headless:
+        tui.server_msg = lambda *a, **kw: None
+        if host:
+            connect()
+        daemonize()
+        while _headless_running[0]:
+            for buf in list(tui.buffers):
+                if buf.is_server and buf.irc and buf.irc.connected:
+                    buf.irc.poll()
+            time.sleep(0.05)
+        return
 
     win = tui.build_window()
     patch_alt_keys(win, tui)

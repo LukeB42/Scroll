@@ -6,7 +6,7 @@ A terminal IRC client written in Python.
 ![screenshot](img/scroll_screenshot.gif)
 
 ```
-Usage: scroll [--help]
+Usage: scroll [--help] [--headless]
 
 scroll is a minimal irssi-inspired IRC client.
 
@@ -42,6 +42,23 @@ Commands (type /help inside scroll for full list):
   /quit [message]   disconnect and exit  (alias: /exit)
   /help [command]   show this help
 ```
+
+## Headless mode
+
+```
+scroll --headless
+```
+
+Connects to all configured servers, loads scripts, and daemonizes immediately
+with no TUI. Useful for running scroll as a bot. Send SIGTERM to stop it.
+
+## Scripting
+
+Scripts are Python files placed in `~/.scroll/scripts/`. They are loaded on
+startup and can be reloaded at runtime with `/reload`, or individually edited
+and reloaded via `/script edit <file.py>`.
+
+There are [15 examples in the scripting reference](https://github.com/LukeB42/Scroll/blob/master/scroll/docs/scripting.txt).
 
 ## Install
 
