@@ -43,6 +43,14 @@ Commands (type /help inside scroll for full list):
   /help [command]   show this help
 ```
 
+## Scripting
+
+Scripts are Python files placed in `~/.scroll/scripts/`. They are loaded on
+startup and can be reloaded at runtime with `/reload`, or individually edited
+and reloaded via `/script edit <file.py>`.
+
+There are [15 examples in the scripting reference](https://github.com/LukeB42/Scroll/blob/master/scroll/docs/scripting.txt).
+
 ## Headless mode
 
 ```
@@ -51,14 +59,6 @@ scroll --headless
 
 Connects to all configured servers, loads scripts, and daemonizes immediately
 with no TUI. Useful for running scroll as a bot. Send SIGTERM to stop it.
-
-## Scripting
-
-Scripts are Python files placed in `~/.scroll/scripts/`. They are loaded on
-startup and can be reloaded at runtime with `/reload`, or individually edited
-and reloaded via `/script edit <file.py>`.
-
-There are [15 examples in the scripting reference](https://github.com/LukeB42/Scroll/blob/master/scroll/docs/scripting.txt).
 
 ## Install
 
